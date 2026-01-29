@@ -1,0 +1,17 @@
+[daq]
+channel = 0                 # should be in range 0-7
+sample_rate = 1000.0        # in Hz
+read_update_period = 0.1    # in seconds
+input_mode = "SE"           # "SE" or "DIFF"
+input_range = "BIP_1V"      # e.g. "BIP_1V", "BIP_5V", etc.
+
+[display]
+scope_time_base = 10.0      # in seconds
+refresh_rate = 50           # in Hz
+
+[writer]
+write_rate = 50             # in Hz
+
+[files]
+output_data_file = "data.dat"
+output_xlsx_file = "data.xlsx"
