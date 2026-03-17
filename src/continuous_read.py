@@ -56,7 +56,8 @@ def get_input_range(range_str):
 def main():
     config = load_config()
 
-    channel = config['daq']['channel']
+    phys_channel = config['daq']['phys_channel']
+    software_channel = phys_channel - 1  # zero-based for API calls
     sample_rate = config['daq']['sample_rate']
     read_update_period = config['daq']['read_update_period']
     input_mode = config['daq']['input_mode']
@@ -65,6 +66,8 @@ def main():
     scope_time_base = config['display']['scope_time_base']
     display_refresh_rate = config['display']['refresh_rate']
     display_decimation = int(sample_rate / display_refresh_rate)
+    display_y_min = config['display']['y_min']
+    display_y_max = config['display']['y_max']
 
     write_rate = config['writer']['write_rate']
     write_interval = 1.0 / write_rate
@@ -78,7 +81,7 @@ def main():
     hat.a_in_mode_write(get_input_mode(input_mode))
     hat.a_in_range_write(get_input_range(input_range))
 
-    channel_mask = 0x01 << channel
+    channel_mask = 0x01 << software_channel
 
     read_buffer_size = int(sample_rate * read_update_period)
 
@@ -165,9 +168,9 @@ def main():
         line, = ax.plot([], [], lw=1)
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Voltage (V)')
-        ax.set_title(f'MCC 128 Channel {channel} ({input_mode})')
+        ax.set_title(f'MCC 128 Physical Channel {phys_channel} ({input_mode})')
         ax.set_xlim(0, scope_time_base)
-        ax.set_ylim(0, 1)
+        ax.set_ylim(display_y_min, display_y_max)
 
         def on_close(_event):
             stop_event.set()
@@ -244,8 +247,9 @@ def main():
         ax_info.set_xlim(0, 1)
         ax_info.set_ylim(0, 1)
         ax_info.axis('off')
-        ax_info.text(0.05, 0.8, f'Sample Rate: {sample_rate:.0f} Hz', fontsize=9, family='monospace')
-        ax_info.text(0.05, 0.4, f'Write Rate: {write_rate} Hz', fontsize=9, family='monospace')
+        ax_info.text(0.05, 1.2, f'Sample Rate: {sample_rate:.0f} Hz', fontsize=9, family='monospace')
+        ax_info.text(0.05, 0.8, f'Write Rate: {write_rate} Hz', fontsize=9, family='monospace')
+        ax_info.text(0.05, 0.4, f'Sample Read: {values[-1] if values else 0:.4f} V', fontsize=9, family='monospace')
 
         sample_count = 0
         display_period = 1.0 / display_refresh_rate
@@ -273,6 +277,7 @@ def main():
                     ax.set_xlim(0, scope_time_base)
                 else:
                     ax.set_xlim(max(0.0, times[-1] - scope_time_base), times[-1])
+                ax_info.texts[2].set_text(f'Sample Read: {values[-1] if values else 0:.4f} V')
                 fig.canvas.draw_idle()
 
             fig.canvas.flush_events()

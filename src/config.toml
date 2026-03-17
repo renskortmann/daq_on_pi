@@ -1,13 +1,15 @@
 [daq]
-channel = 0                 # should be in range 0-7
+phys_channel = 4            # physical channel should be in range 1-4 (DIFF) or 1-8 (SE)
 sample_rate = 1000.0        # in Hz
 read_update_period = 0.1    # in seconds
-input_mode = "SE"           # "SE" or "DIFF"
-input_range = "BIP_1V"      # e.g. "BIP_1V", "BIP_5V", etc.
+input_mode = "DIFF"           # "SE" or "DIFF"
+input_range = "BIP_10V"      # e.g. "BIP_1V", "BIP_5V", etc.
 
 [display]
 scope_time_base = 10.0      # in seconds
 refresh_rate = 50           # in Hz
+y_min = -10                 # in volts
+y_max = 10                  # in volts
 
 [writer]
 write_rate = 50             # in Hz
