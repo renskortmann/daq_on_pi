@@ -2,6 +2,7 @@ import struct
 import time
 import threading
 import queue
+import math
 from collections import deque
 
 import matplotlib.pyplot as plt
@@ -62,6 +63,19 @@ def main():
     read_update_period = config['daq']['read_update_period']
     input_mode = config['daq']['input_mode']
     input_range = config['daq']['input_range']
+    cutoff_frequency_hz = config['daq']['cutoff_frequency_hz']
+
+    if sample_rate <= 0:
+        raise ValueError('sample_rate must be greater than 0 Hz')
+    if cutoff_frequency_hz <= 0:
+        raise ValueError('cutoff_frequency_hz must be greater than 0 Hz')
+
+    nyquist_hz = sample_rate / 2.0
+    if cutoff_frequency_hz >= nyquist_hz:
+        cutoff_coeff = 1.0
+    else:
+        dt = 1.0 / sample_rate
+        cutoff_coeff = 1.0 - math.exp(-2.0 * math.pi * cutoff_frequency_hz * dt)
 
     scope_time_base = config['display']['scope_time_base']
     display_refresh_rate = config['display']['refresh_rate']
@@ -74,6 +88,18 @@ def main():
 
     output_data_file = config['files']['output_data_file']
     output_xlsx_file = config['files']['output_xlsx_file']
+
+    load_scales = config['conversion']['load_scale']
+    load_offsets = config['conversion']['load_offset']
+
+    if len(load_scales) != 4 or len(load_offsets) != 4:
+        raise ValueError('conversion.load_scale and conversion.load_offset must each contain 4 values for channels 1-4')
+    if not 1 <= phys_channel <= 4:
+        raise ValueError('phys_channel must be in the range 1-4 for conversion parameters')
+
+    channel_index = phys_channel - 1
+    load_scale = float(load_scales[channel_index])
+    load_offset = float(load_offsets[channel_index])
 
     address = select_hat_device(HatIDs.MCC_128)
     hat = mcc128(address)
@@ -100,6 +126,7 @@ def main():
 
     def acquisition_worker():
         sample_count = 0
+        filtered_value = None
         try:
             while not stop_event.is_set():
                 read_result = hat.a_in_scan_read(read_buffer_size, timeout=1.0)
@@ -115,9 +142,18 @@ def main():
                     continue
 
                 for value in data:
+
+                    raw_value = value
                     current_time = sample_count / sample_rate
-                    display_queue.put((current_time, value))
-                    write_queue.put((current_time, value))
+                    # Single-pole IIR low-pass filter.
+                    if filtered_value is None:
+                        filtered_value = raw_value
+                    else:
+                        filtered_value += cutoff_coeff * (raw_value - filtered_value)
+
+                    load_value = load_scale * filtered_value + load_offset
+                    display_queue.put((current_time, load_value))
+                    write_queue.put((current_time, raw_value, filtered_value, load_value))
                     sample_count += 1
         finally:
             hat.a_in_scan_stop()
@@ -145,14 +181,14 @@ def main():
                 pass
 
             try:
-                timestamp, voltage = write_queue.get(timeout=0.1)
+                timestamp, raw_voltage, filtered_voltage, load_value = write_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
             # Only write if enough time has passed since last write
             if recording and data_file is not None:
                 if timestamp - last_write_time >= write_interval:
-                    data_file.write(struct.pack('<dd', timestamp, voltage))
+                    data_file.write(struct.pack('<dddd', timestamp, raw_voltage, filtered_voltage, load_value))
                     last_write_time = timestamp
 
         if data_file is not None:
@@ -167,7 +203,7 @@ def main():
         fig.subplots_adjust(left=0.1, right=0.65, bottom=0.15, top=0.95)
         line, = ax.plot([], [], lw=1)
         ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Voltage (V)')
+        ax.set_ylabel('Load')
         ax.set_title(f'MCC 128 Physical Channel {phys_channel} ({input_mode})')
         ax.set_xlim(0, scope_time_base)
         ax.set_ylim(display_y_min, display_y_max)
@@ -191,29 +227,30 @@ def main():
                 print(f'No {output_data_file} found to convert.')
                 return
 
-            record_size = struct.calcsize('<dd')
+            record_size = struct.calcsize('<dddd')
+
             if len(payload) % record_size != 0:
-                print('Binary file size is not aligned to record size; conversion aborted.')
+                print('Data file does not contain stored load values (<dddd> format required); conversion aborted.')
                 return
 
             rows = []
             for offset in range(0, len(payload), record_size):
-                timestamp, voltage = struct.unpack_from('<dd', payload, offset)
-                rows.append((timestamp, voltage))
+                timestamp, voltage_raw, voltage_filtered, load = struct.unpack_from('<dddd', payload, offset)
+                rows.append((timestamp, voltage_raw, voltage_filtered, load))
 
             if not rows:
                 print('No data found to convert.')
                 return
 
-            df = pd.DataFrame(rows, columns=['time_s', 'voltage_v'])
+            df = pd.DataFrame(rows, columns=['time_s', 'voltage_raw_v', 'voltage_filtered_v', 'load'])
             df.to_excel(output_xlsx_file, index=False)
             print(f'Wrote {output_xlsx_file} with {len(df)} rows.')
 
             # Display converted data in a separate window
             fig_data, ax_data = plt.subplots(figsize=(10, 6))
-            ax_data.plot(df['time_s'], df['voltage_v'], lw=1)
+            ax_data.plot(df['time_s'], df['load'], lw=1)
             ax_data.set_xlabel('Time (s)')
-            ax_data.set_ylabel('Voltage (V)')
+            ax_data.set_ylabel('Load')
             ax_data.set_title(f'Converted Data - {len(df)} samples')
             ax_data.grid(True, alpha=0.3)
             plt.show()
@@ -249,7 +286,7 @@ def main():
         ax_info.axis('off')
         ax_info.text(0.05, 1.2, f'Sample Rate: {sample_rate:.0f} Hz', fontsize=9, family='monospace')
         ax_info.text(0.05, 0.8, f'Write Rate: {write_rate} Hz', fontsize=9, family='monospace')
-        ax_info.text(0.05, 0.4, f'Sample Read: {values[-1] if values else 0:.4f} V', fontsize=9, family='monospace')
+        ax_info.text(0.05, 0.4, f'Load: {values[-1] if values else 0:.4f} N', fontsize=9, family='monospace')
 
         sample_count = 0
         display_period = 1.0 / display_refresh_rate
@@ -277,7 +314,17 @@ def main():
                     ax.set_xlim(0, scope_time_base)
                 else:
                     ax.set_xlim(max(0.0, times[-1] - scope_time_base), times[-1])
-                ax_info.texts[2].set_text(f'Sample Read: {values[-1] if values else 0:.4f} V')
+
+                data_min = min(values)
+                data_max = max(values)
+                data_span = data_max - data_min
+                if data_span > 0:
+                    y_padding = data_span * 0.1
+                else:
+                    y_padding = max(abs(data_max) * 0.1, 0.1)
+                ax.set_ylim(data_min - y_padding, data_max + y_padding)
+
+                ax_info.texts[2].set_text(f'Load: {values[-1] if values else 0:.4f} N')
                 fig.canvas.draw_idle()
 
             fig.canvas.flush_events()

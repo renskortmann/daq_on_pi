@@ -1,6 +1,7 @@
 [daq]
-phys_channel = 4            # physical channel should be in range 1-4 (DIFF) or 1-8 (SE)
+phys_channel = 1            # physical channel should be in range 1-4 (DIFF) or 1-8 (SE)
 sample_rate = 1000.0        # in Hz
+cutoff_frequency_hz = 10    # low-pass filter cutoff in hertz (Hz)
 read_update_period = 0.1    # in seconds
 input_mode = "DIFF"           # "SE" or "DIFF"
 input_range = "BIP_10V"      # e.g. "BIP_1V", "BIP_5V", etc.
@@ -17,3 +18,9 @@ write_rate = 50             # in Hz
 [files]
 output_data_file = "data.dat"
 output_xlsx_file = "data.xlsx"
+
+[conversion]
+#load_scale = [-8.3693, -8.4055, 1.0, 1.0]   # [ch1, ch2, ch3, ch4]
+#load_offset = [0.3460, 0.1067, 0.0, 0.0]      # [ch1, ch2, ch3, ch4]
+load_scale = [-8.4339, -8.4383, 1.0, 1.0]   # [ch1, ch2, ch3, ch4]
+load_offset = [0.2228, 0.0438, 0.0, 0.0]      # [ch1, ch2, ch3, ch4]

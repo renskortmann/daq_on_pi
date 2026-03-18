@@ -2,8 +2,15 @@
     This file contains helper functions for the MCC DAQ HAT Python examples.
 """
 from __future__ import print_function
-from daqhats import hat_list, HatError, AnalogInputMode, \
-    AnalogInputRange
+from enum import Enum
+
+from daqhats import (
+    AnalogInputMode,
+    AnalogInputRange,
+    HatError,
+    HatIDs,
+    hat_list,
+)
 
 
 def select_hat_device(filter_by_id):
@@ -106,7 +113,7 @@ def chan_list_to_mask(chan_list):
     return chan_mask
 
 def input_mode_to_string(input_mode):
-    # type: (int) -> string
+    # type: (int) -> str
     """
     This function returns a string representation of the input mode.
 
@@ -127,7 +134,7 @@ def input_mode_to_string(input_mode):
     return mode_str
 
 def input_range_to_string(input_range):
-    # type: (int) -> string
+    # type: (int) -> str
     """
     This function returns a string representation of the input range.
 
