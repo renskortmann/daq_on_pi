@@ -22,5 +22,9 @@ output_xlsx_file = "data.xlsx"
 [conversion]
 #load_scale = [-8.3693, -8.4055, 1.0, 1.0]   # [ch1, ch2, ch3, ch4]
 #load_offset = [0.3460, 0.1067, 0.0, 0.0]      # [ch1, ch2, ch3, ch4]
-load_scale = [-8.4339, -8.4383, 1.0, 1.0]   # [ch1, ch2, ch3, ch4]
-load_offset = [0.2228, 0.0438, 0.0, 0.0]      # [ch1, ch2, ch3, ch4]
+load_scale = [-8.4786, -8.4428, 1.0, 1.0]   # [ch1, ch2, ch3, ch4]
+load_offset = [0.2189, 0.0079, 0.0, 0.0]      # [ch1, ch2, ch3, ch4]
+
+[gui]
+initial_checked_channels = [1, 2]  # channels to check at startup (1-based)
+initial_auto_zero_samples = 100     # number of samples to acquire before startup auto-zero
