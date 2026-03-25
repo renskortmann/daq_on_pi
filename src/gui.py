@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from collections import deque
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -9,6 +10,9 @@ import queue
 import math
 import struct
 import os
+import stat
+import pwd
+import grp
 
 try:
     import tomllib  # Python 3.11+
@@ -30,8 +34,10 @@ except ImportError:
     HAS_DAQHATS = False
 
 
-def load_config(path='src/config.toml'):
+def load_config(path=None):
     """Load configuration from TOML file."""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.toml')
     with open(path, 'rb') as f:
         return tomllib.load(f)
 
@@ -86,6 +92,9 @@ class DAQGUIApp:
         self.root = root
         self.root.title("DAQ Monitor")
         self.root.geometry("1200x800")
+        self.app_icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.png")
+        self.app_icon_image = None
+        self.apply_window_icon()
         self.num_channels = 4
         
         # Load configuration
@@ -167,6 +176,7 @@ class DAQGUIApp:
         
         # DAQ hardware
         self.hat = None
+        self.hardware_error_message = None
         self.acquisition_thread = None
         self.writer_thread = None
         self.is_recording = False
@@ -197,17 +207,118 @@ class DAQGUIApp:
         
         # Create main content area (plot + dashboard)
         self.create_content_area()
+
+        # Startup self-check catches common cross-user hardware access problems early.
+        if HAS_DAQHATS:
+            startup_issues = self.run_startup_self_check()
+            if startup_issues:
+                lines = [
+                    "Startup self-check detected hardware access risks:",
+                    *[f"- {issue}" for issue in startup_issues],
+                    "",
+                    "If data looks jittery/incorrect, the app may fall back to simulation mode.",
+                ]
+                messagebox.showwarning("DAQ Startup Self-Check", "\n".join(lines))
         
         # Initialize hardware and start acquisition
         self.initialize_hardware()
         self.start_acquisition()
         self.start_writer()
+
+        if HAS_DAQHATS and self.hat is None and self.hardware_error_message:
+            warning_lines = [
+                "DAQ hardware initialization failed. Running in simulation mode.",
+                f"Error: {self.hardware_error_message}",
+            ]
+            if 'Board not responding' in self.hardware_error_message:
+                warning_lines.append("Check /tmp/.mcc_spi_lockfile ownership (expected: root:root, mode 0666).")
+            messagebox.showwarning("DAQ Hardware Unavailable", "\n".join(warning_lines))
         
         # Start periodic display update
         self.update_display()
         
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def apply_window_icon(self):
+        """Apply app icon from src/app_icon.png when available."""
+        icon_candidates = [
+            self.app_icon_path,
+            os.path.join(matplotlib.get_data_path(), "images", "matplotlib.png"),
+        ]
+
+        for icon_path in icon_candidates:
+            if not os.path.isfile(icon_path):
+                continue
+            try:
+                # Keep a reference to avoid Tkinter garbage-collecting the icon image.
+                self.app_icon_image = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(True, self.app_icon_image)
+                return
+            except tk.TclError as exc:
+                print(f"Warning: Could not set app icon from {icon_path}: {exc}")
+
+    def run_startup_self_check(self):
+        """Check for common DAQ access issues for the current user/session."""
+        issues = []
+
+        try:
+            username = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            username = str(os.getuid())
+
+        # Verify current user belongs to required hardware groups.
+        required_groups = ('spi', 'gpio', 'i2c')
+        group_ids = set(os.getgroups())
+        group_ids.add(os.getgid())
+        user_groups = set()
+        for gid in group_ids:
+            try:
+                user_groups.add(grp.getgrgid(gid).gr_name)
+            except KeyError:
+                continue
+
+        missing_groups = [g for g in required_groups if g not in user_groups]
+        if missing_groups:
+            issues.append(
+                f"User '{username}' is missing required groups: {', '.join(missing_groups)}"
+            )
+
+        # Verify MCC lock file shape expected for multi-user systems.
+        lockfile = '/tmp/.mcc_spi_lockfile'
+        if not os.path.exists(lockfile):
+            issues.append(f"Missing lock file: {lockfile}")
+            return issues
+
+        try:
+            st = os.stat(lockfile)
+            lock_mode = stat.S_IMODE(st.st_mode)
+        except OSError as exc:
+            issues.append(f"Could not stat lock file {lockfile}: {exc}")
+            return issues
+
+        if st.st_uid != 0 or st.st_gid != 0:
+            try:
+                owner = pwd.getpwuid(st.st_uid).pw_name
+            except KeyError:
+                owner = str(st.st_uid)
+            try:
+                group = grp.getgrgid(st.st_gid).gr_name
+            except KeyError:
+                group = str(st.st_gid)
+            issues.append(
+                f"Lock file owner/group is {owner}:{group}; expected root:root"
+            )
+
+        if lock_mode != 0o666:
+            issues.append(
+                f"Lock file mode is {oct(lock_mode)}; expected 0o666"
+            )
+
+        for issue in issues:
+            print(f"Startup self-check warning: {issue}")
+
+        return issues
     
     def create_menu_bar(self):
         """Create the menu bar (empty for now)."""
@@ -449,6 +560,7 @@ class DAQGUIApp:
         except Exception as e:
             print(f"Warning: Could not initialize hardware: {e}")
             print("Running in simulation mode.")
+            self.hardware_error_message = str(e)
             self.hat = None
     
     def start_acquisition(self):
