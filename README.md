@@ -14,6 +14,10 @@ A data acquisition application for Raspberry Pi using the [MCC 128](https://www.
 - System-wide deployment with a desktop launcher and `daq-monitor` CLI command
 - Alternative browser-based interface via Dash/Plotly (`web_server.py`)
 
+## Screenshot
+
+![DAQ Monitor GUI](images/DAQ_Monitor_cropped.png)
+
 ## Hardware Requirements
 
 - Raspberry Pi (any model with 40-pin GPIO)

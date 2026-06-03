@@ -238,7 +238,10 @@ class DAQGUIApp:
                 f"Error: {self.hardware_error_message}",
             ]
             if 'Board not responding' in self.hardware_error_message:
-                warning_lines.append("Check /tmp/.mcc_spi_lockfile ownership (expected: root:root, mode 0666).")
+                warning_lines.append(
+                    "Check /tmp/.mcc_spi_lockfile ownership "
+                    "(expected: root:spi mode 0660, or root:root mode 0666 if spi group is unavailable)."
+                )
             messagebox.showwarning("DAQ Hardware Unavailable", "\n".join(warning_lines))
         
         # Start periodic display update
@@ -304,7 +307,17 @@ class DAQGUIApp:
             issues.append(f"Could not stat lock file {lockfile}: {exc}")
             return issues
 
-        if st.st_uid != 0 or st.st_gid != 0:
+        expected_gid = 0
+        expected_group_name = 'root'
+        expected_mode = 0o666
+        try:
+            expected_gid = grp.getgrnam('spi').gr_gid
+            expected_group_name = 'spi'
+            expected_mode = 0o660
+        except KeyError:
+            pass
+
+        if st.st_uid != 0 or st.st_gid != expected_gid:
             try:
                 owner = pwd.getpwuid(st.st_uid).pw_name
             except KeyError:
@@ -314,12 +327,12 @@ class DAQGUIApp:
             except KeyError:
                 group = str(st.st_gid)
             issues.append(
-                f"Lock file owner/group is {owner}:{group}; expected root:root"
+                f"Lock file owner/group is {owner}:{group}; expected root:{expected_group_name}"
             )
 
-        if lock_mode != 0o666:
+        if lock_mode != expected_mode:
             issues.append(
-                f"Lock file mode is {oct(lock_mode)}; expected 0o666"
+                f"Lock file mode is {oct(lock_mode)}; expected {oct(expected_mode)}"
             )
 
         for issue in issues:

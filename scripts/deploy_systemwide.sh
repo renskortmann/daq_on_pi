@@ -9,6 +9,8 @@ DESKTOP_FILE="/usr/share/applications/daq-monitor.desktop"
 APP_ICON_PATH="${INSTALL_ROOT}/src/app_icon.png"
 MCC_SPI_LOCKFILE="/tmp/.mcc_spi_lockfile"
 TMPFILES_CONF="/etc/tmpfiles.d/daq-monitor.conf"
+LOCKFILE_GROUP="root"
+LOCKFILE_MODE="0666"
 
 # Groups required on Raspberry Pi OS to access MCC HAT hardware (SPI, GPIO, I2C).
 HW_GROUPS=(spi gpio i2c)
@@ -68,6 +70,11 @@ if ! command -v sudo >/dev/null 2>&1; then
   exit 1
 fi
 
+if getent group spi >/dev/null 2>&1; then
+  LOCKFILE_GROUP="spi"
+  LOCKFILE_MODE="0660"
+fi
+
 echo "Deploying from ${SOURCE_DIR}"
 echo "Install root: ${INSTALL_ROOT}"
 
@@ -76,6 +83,8 @@ sudo rsync -a --delete \
   --exclude '.git/' \
   --exclude '__pycache__/' \
   "${SOURCE_DIR}/" "${INSTALL_ROOT}/"
+sudo chown -R root:root "${INSTALL_ROOT}"
+sudo chmod -R go-w "${INSTALL_ROOT}"
 
 if [[ ! -f "${APP_ICON_PATH}" ]]; then
   FALLBACK_ICON_PATH="$("${SOURCE_DIR}/venv/bin/python" -c 'import os, matplotlib; print(os.path.join(matplotlib.get_data_path(), "images", "matplotlib.png"))' 2>/dev/null || true)"
@@ -119,20 +128,61 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   sudo update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi
 
+ensure_shared_lockfile() {
+  if command -v python3 >/dev/null 2>&1; then
+    sudo python3 - "${MCC_SPI_LOCKFILE}" "${LOCKFILE_GROUP}" "${LOCKFILE_MODE}" <<'PY'
+import os
+import grp
+import stat
+import sys
+
+path = sys.argv[1]
+group_name = sys.argv[2]
+file_mode = int(sys.argv[3], 8)
+flags = os.O_WRONLY | os.O_CREAT
+if hasattr(os, 'O_NOFOLLOW'):
+    flags |= os.O_NOFOLLOW
+
+try:
+    st = os.lstat(path)
+except FileNotFoundError:
+    st = None
+
+if st is not None:
+    if stat.S_ISLNK(st.st_mode):
+        raise SystemExit(f"Refusing to operate on symlink: {path}")
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit(f"Refusing to operate on non-regular file: {path}")
+
+try:
+    gid = grp.getgrnam(group_name).gr_gid
+except KeyError as exc:
+    raise SystemExit(f"Required group not found: {group_name}") from exc
+
+fd = os.open(path, flags, 0o666)
+os.close(fd)
+os.chown(path, 0, gid)
+os.chmod(path, file_mode)
+PY
+  else
+    echo "Warning: python3 not found; skipping immediate lockfile creation." >&2
+    echo "The tmpfiles rule at ${TMPFILES_CONF} will create ${MCC_SPI_LOCKFILE} on systems with systemd-tmpfiles." >&2
+  fi
+}
+
 # Ensure MCC daqhats lock file works across all users.
 # daqhats uses /tmp/.mcc_spi_lockfile; if this file is created by a regular
 # user, other users can fail with "Board not responding." due to /tmp sticky
-# directory semantics. Keep it root-owned and world writable.
-sudo tee "${TMPFILES_CONF}" >/dev/null <<'EOF'
+# directory semantics. Keep it root-owned and writable only by the hardware
+# access group when available.
+sudo tee "${TMPFILES_CONF}" >/dev/null <<EOF
 # DAQ Monitor: keep MCC SPI lock file shared across users
-f /tmp/.mcc_spi_lockfile 0666 root root -
+f /tmp/.mcc_spi_lockfile ${LOCKFILE_MODE} root ${LOCKFILE_GROUP} -
 EOF
 if command -v systemd-tmpfiles >/dev/null 2>&1; then
   sudo systemd-tmpfiles --create "${TMPFILES_CONF}" >/dev/null 2>&1 || true
 fi
-sudo touch "${MCC_SPI_LOCKFILE}"
-sudo chown root:root "${MCC_SPI_LOCKFILE}"
-sudo chmod 666 "${MCC_SPI_LOCKFILE}"
+ensure_shared_lockfile
 
 # ── Hardware group membership ────────────────────────────────────────────────
 # The MCC 128 HAT uses SPI/GPIO/I2C.  On Raspberry Pi OS those devices are
@@ -164,7 +214,7 @@ done
 echo ""
 echo "Hardware access reminder:"
 echo "  Any user who runs ${APP_NAME} must be a member of the spi, gpio, and i2c groups."
-echo "  The MCC SPI lock file is managed at ${MCC_SPI_LOCKFILE} with root:root 0666 permissions."
+echo "  The MCC SPI lock file is managed at ${MCC_SPI_LOCKFILE} with root:${LOCKFILE_GROUP} ${LOCKFILE_MODE} permissions."
 echo "  Without group membership the app falls back to simulated data silently."
 echo "  To grant access to a user:  sudo usermod -aG spi,gpio,i2c <username>"
 echo "  (The user must log out and back in for group changes to take effect.)"
