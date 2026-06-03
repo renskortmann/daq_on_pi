@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from collections import deque
 import matplotlib
 import matplotlib.pyplot as plt
@@ -92,6 +92,7 @@ class DAQGUIApp:
         self.root = root
         self.root.title("DAQ Monitor")
         self.root.geometry("1200x800")
+        self.root.attributes('-zoomed', True)
         self.app_icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.png")
         self.app_icon_image = None
         self.apply_window_icon()
@@ -121,6 +122,11 @@ class DAQGUIApp:
             self.initial_auto_zero_samples = resolve_initial_auto_zero_samples(
                 gui_config.get('initial_auto_zero_samples')
             )
+            raw_channel_names = gui_config.get('channel_names', [])
+            self.channel_names = [
+                raw_channel_names[i] if i < len(raw_channel_names) and isinstance(raw_channel_names[i], str) else ''
+                for i in range(self.num_channels)
+            ]
             if len(self.load_scales) < self.num_channels or len(self.load_offsets) < self.num_channels:
                 raise ValueError('conversion.load_scale and conversion.load_offset must contain 4 values')
             self.load_scales = [float(v) for v in self.load_scales[:self.num_channels]]
@@ -145,6 +151,7 @@ class DAQGUIApp:
             self.load_offsets = [0.0] * self.num_channels
             self.initial_checked_channels = list(range(1, self.num_channels + 1))
             self.initial_auto_zero_samples = 50
+            self.channel_names = [''] * self.num_channels
 
         self.display_decimation = max(1, int(self.sample_rate / self.display_refresh_rate))
 
@@ -358,7 +365,7 @@ class DAQGUIApp:
             command=self.on_start_recording,
         )
         self.stop_button = ttk.Button(recording_group, text="Stop", command=self.on_stop_recording)
-        self.convert_button = ttk.Button(recording_group, text="Convert to XLSX", command=self.on_convert_to_xlsx)
+        self.convert_button = ttk.Button(recording_group, text="Convert to CSV", command=self.on_convert_to_csv)
 
         channels_group = ttk.LabelFrame(self.toolbar, text="Channels", padding=5)
         channels_group.pack(side=tk.LEFT, fill=tk.X, padx=5)
@@ -410,7 +417,7 @@ class DAQGUIApp:
         self.ax.set_xlim(0, self.scope_time_base)
         self.ax.set_ylim(self.display_y_min, self.display_y_max)
         self.ax.grid(True, alpha=0.3)
-        self.ax.legend(loc='upper right')
+        self.ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01), ncol=self.num_channels, frameon=True)
         
         # Embed matplotlib in tkinter
         self.canvas = FigureCanvasTkAgg(self.fig, master=left_frame)
@@ -436,19 +443,20 @@ class DAQGUIApp:
         table_frame = ttk.Frame(self.dashboard_frame)
         table_frame.grid(row=0, column=0, sticky="nsew")
 
-        columns = ('channel', 'raw', 'filtered', 'load')
+        columns = ('channel_id', 'channel_name', 'raw', 'filtered', 'load')
         self.table = ttk.Treeview(table_frame, columns=columns, show='headings', height=self.num_channels)
-        self.table.heading('channel', text='Channel')
-        self.table.heading('raw',     text='Raw (V)')
-        self.table.heading('filtered', text='Filtered (V)')
-        self.table.heading('load',    text='Load (N)')
+        self.table.heading('channel_id',   text='Channel ID')
+        self.table.heading('channel_name', text='Channel Name')
+        self.table.heading('raw',          text='Raw (V)')
+        self.table.heading('filtered',     text='Filtered (V)')
+        self.table.heading('load',         text='Load (N)')
         for col in columns:
             self.table.column(col, anchor=tk.CENTER, width=90)
         self.table.pack(fill=tk.X, expand=False)
 
         # Pre-populate one row per channel; rows are shown/hidden via update_table
         for i in range(self.num_channels):
-            self.table.insert('', tk.END, iid=str(i), values=(f'Channel {i + 1}', '—', '—', '—'))
+            self.table.insert('', tk.END, iid=str(i), values=(i + 1, self.channel_names[i], '—', '—', '—'))
 
         # Secondary table for manual/derived values
         table_gap_px = int(round(self.root.winfo_fpixels('2m')))
@@ -493,9 +501,17 @@ class DAQGUIApp:
                 row_entries.append(entry)
             self.derived_entries.append(row_entries)
 
-        # Draw button below the secondary table
-        self.draw_button = ttk.Button(self.dashboard_frame, text='Draw', command=self.on_draw_dashboard_plot)
-        self.draw_button.grid(row=2, column=0, sticky='w', pady=(8, 0))
+        # Draw / Export / Save figure buttons below the secondary table
+        buttons_frame = ttk.Frame(self.dashboard_frame)
+        buttons_frame.grid(row=2, column=0, sticky='w', pady=(8, 0))
+
+        self.draw_button = ttk.Button(buttons_frame, text='Draw', command=self.on_draw_dashboard_plot)
+        self.export_data_button = ttk.Button(buttons_frame, text='Export Data', command=self.on_export_data)
+        self.save_figure_button = ttk.Button(buttons_frame, text='Save Figure', command=self.on_save_figure)
+
+        self.draw_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.export_data_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.save_figure_button.pack(side=tk.LEFT)
 
         # Plot area under the secondary table and Draw button
         self.dashboard_plot_frame = ttk.Frame(self.dashboard_frame)
@@ -601,6 +617,7 @@ class DAQGUIApp:
     def writer_worker(self):
         """Worker thread that handles start/stop recording and binary file writes."""
         data_file = None
+        data_file_path = None
         recording = False
         last_write_time = 0.0
         recording_time_offset = None
@@ -612,15 +629,16 @@ class DAQGUIApp:
                 try:
                     while True:
                         command = self.command_queue.get_nowait()
-                        if command == 'start' and not recording:
+                        if isinstance(command, tuple) and command[0] == 'start' and not recording:
+                            data_file_path = command[1]
                             active_channels_at_start = self.active_channels.copy()
                             record_struct_fmt = '<' + ('d' * (1 + 3 * len(active_channels_at_start)))
-                            data_file = open(self.output_data_file, 'wb')
+                            data_file = open(data_file_path, 'wb')
                             recording = True
                             self.is_recording = True
                             last_write_time = 0.0
                             recording_time_offset = None
-                            print(f"Recording started: {self.output_data_file} (channels: {[ch+1 for ch in active_channels_at_start]})")
+                            print(f"Recording started: {data_file_path} (channels: {[ch+1 for ch in active_channels_at_start]})")
                         elif command == 'stop' and recording:
                             recording = False
                             self.is_recording = False
@@ -628,8 +646,8 @@ class DAQGUIApp:
                                 data_file.close()
                                 data_file = None
                             # Store metadata about which channels were recorded
-                            if active_channels_at_start is not None:
-                                with open(self.output_data_file + '.meta', 'w') as meta_file:
+                            if active_channels_at_start is not None and data_file_path:
+                                with open(data_file_path + '.meta', 'w') as meta_file:
                                     meta_file.write(','.join(str(ch + 1) for ch in active_channels_at_start))
                             print("Recording stopped")
                 except queue.Empty:
@@ -667,6 +685,18 @@ class DAQGUIApp:
             messagebox.showwarning("No Channels Selected", "Please select at least one channel to record.")
             return
 
+        data_file_path = filedialog.asksaveasfilename(
+            title="Save Recording As",
+            defaultextension=".dat",
+            filetypes=[("DAQ data files", "*.dat"), ("All files", "*.*")],
+            initialdir=os.path.expanduser("~"),
+            initialfile=os.path.basename(self.output_data_file) if self.output_data_file else "recording.dat",
+        )
+        if not data_file_path:
+            return
+
+        self.output_data_file = data_file_path
+
         # Reset displayed timeline so recording starts at t=0 on the plot.
         self.times.clear()
         for channel_series in self.channel_values:
@@ -682,7 +712,7 @@ class DAQGUIApp:
         self.convert_button.config(state='disabled')
         self.start_button.config(text='Recording', style='StartRecording.TButton')
         self.disable_channel_checkboxes()
-        self.command_queue.put('start')
+        self.command_queue.put(('start', data_file_path))
 
     def on_stop_recording(self):
         """Stop binary recording if active."""
@@ -809,9 +839,9 @@ class DAQGUIApp:
         self.dashboard_plot_ax_left = self.dashboard_plot_fig.add_subplot(111)
         self.dashboard_plot_ax_right = self.dashboard_plot_ax_left.twinx()
 
-        line_pos, = self.dashboard_plot_ax_left.plot(weights, positions, marker='o', lw=1.5, label='Position')
-        line_top, = self.dashboard_plot_ax_right.plot(weights, loads_top, marker='s', lw=1.5, label='Load top')
-        line_bottom, = self.dashboard_plot_ax_right.plot(weights, loads_bottom, marker='^', lw=1.5, label='Load bottom')
+        line_pos, = self.dashboard_plot_ax_left.plot(weights, positions, marker='o', lw=1.5, label='Position', color='tab:blue')
+        line_top, = self.dashboard_plot_ax_right.plot(weights, loads_top, marker='s', lw=1.5, label='Load top', color='tab:orange')
+        line_bottom, = self.dashboard_plot_ax_right.plot(weights, loads_bottom, marker='^', lw=1.5, label='Load bottom', color='tab:orange')
 
         self.dashboard_plot_ax_left.set_xlabel('Weight (g)')
         self.dashboard_plot_ax_left.set_ylabel('Position (mm)')
@@ -819,10 +849,53 @@ class DAQGUIApp:
         self.dashboard_plot_ax_left.grid(True, alpha=0.3)
 
         all_lines = [line_pos, line_top, line_bottom]
-        self.dashboard_plot_ax_left.legend(all_lines, [line.get_label() for line in all_lines], loc='best')
-
-        self.dashboard_plot_fig.tight_layout()
+        self.dashboard_plot_fig.legend(
+            all_lines, [line.get_label() for line in all_lines],
+            loc='upper center',
+            bbox_to_anchor=(0.5, 0.98),
+            ncol=3,
+            frameon=True,
+        )
+        self.dashboard_plot_fig.tight_layout(rect=[0, 0, 1, 0.88])
         self.dashboard_plot_canvas.draw_idle()
+
+    def on_export_data(self):
+        """Save the derived table data to a CSV file chosen by the user."""
+        file_path = filedialog.asksaveasfilename(
+            title="Export Data",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialdir=os.path.expanduser("~"),
+        )
+        if not file_path:
+            return
+
+        headers = ('Weight (g)', 'Position (mm)', 'Load top (N)', 'Load bottom (N)')
+        try:
+            with open(file_path, 'w', newline='') as csv_file:
+                import csv
+                writer = csv.writer(csv_file)
+                writer.writerow(headers)
+                for row_entries in self.derived_entries:
+                    writer.writerow([entry.get().strip() for entry in row_entries])
+        except OSError as exc:
+            messagebox.showerror("Export Failed", f"Could not write file:\n{exc}")
+
+    def on_save_figure(self):
+        """Save the dashboard plot figure as a PNG file chosen by the user."""
+        file_path = filedialog.asksaveasfilename(
+            title="Save Figure",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("All files", "*.*")],
+            initialdir=os.path.expanduser("~"),
+        )
+        if not file_path:
+            return
+
+        try:
+            self.dashboard_plot_fig.savefig(file_path, dpi=150, bbox_inches='tight')
+        except OSError as exc:
+            messagebox.showerror("Save Failed", f"Could not save figure:\n{exc}")
 
     def update_active_channels(self):
         """Update the list of active channels based on checkbox state."""
@@ -833,9 +906,9 @@ class DAQGUIApp:
         """Update the plot legend to only show visible (active) channels."""
         visible_lines = [self.lines[i] for i in self.active_channels]
         if visible_lines:
-            self.ax.legend(handles=visible_lines, loc='upper right')
+            self.ax.legend(handles=visible_lines, loc='lower center', bbox_to_anchor=(0.5, 1.01), ncol=len(visible_lines), frameon=True)
         else:
-            self.ax.legend([], loc='upper right')
+            self.ax.legend([], loc='lower center', bbox_to_anchor=(0.5, 1.01), frameon=True)
         self.canvas.draw_idle()
 
     def update_table(self):
@@ -851,7 +924,8 @@ class DAQGUIApp:
                     flt = None
                     load = None
                 self.table.item(str(i), values=(
-                    f'Channel {i + 1}',
+                    i + 1,
+                    self.channel_names[i],
                     f'{raw:.4f}' if raw is not None else '—',
                     f'{flt:.4f}' if flt is not None else '—',
                     f'{load:.4f}' if load is not None else '—',
@@ -874,14 +948,24 @@ class DAQGUIApp:
         for chk in self.checkbox_widgets:
             chk.config(state='normal')
 
-    def on_convert_to_xlsx(self):
-        """Convert recorded binary data to XLSX and plot all channel loads."""
+    def on_convert_to_csv(self):
+        """Convert recorded binary data to CSV and plot all channel loads."""
         if self.is_recording:
-            messagebox.showwarning("Recording Active", "Stop recording before converting to XLSX.")
+            messagebox.showwarning("Recording Active", "Stop recording before converting to CSV.")
             return
 
         if not os.path.exists(self.output_data_file):
             messagebox.showwarning("No Data File", f"No {self.output_data_file} found to convert.")
+            return
+
+        output_csv_file = filedialog.asksaveasfilename(
+            title="Save CSV As",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialdir=os.path.expanduser("~"),
+            initialfile=os.path.splitext(os.path.basename(self.output_data_file))[0] + ".csv",
+        )
+        if not output_csv_file:
             return
 
         # Read metadata to determine which channels were recorded
@@ -898,12 +982,6 @@ class DAQGUIApp:
                     print("Warning: .meta file contained no valid channel numbers; using defaults.")
             except Exception as e:
                 print(f"Warning: Could not read channel metadata: {e}")
-
-        try:
-            import pandas as pd
-        except ImportError:
-            messagebox.showerror("Missing Dependency", "pandas is required for XLSX conversion.")
-            return
 
         try:
             with open(self.output_data_file, 'rb') as input_file:
@@ -938,31 +1016,30 @@ class DAQGUIApp:
                 messagebox.showinfo("No Data", "No data found to convert.")
                 return
 
-            df = pd.DataFrame(rows)
-            df.to_excel(self.output_xlsx_file, index=False)
-            df_from_xlsx = pd.read_excel(self.output_xlsx_file)
-
-            required_load_columns = [f'ch{ch}_load' for ch in recorded_channels]
-            if 'time_s' not in df_from_xlsx.columns or any(col not in df_from_xlsx.columns for col in required_load_columns):
-                messagebox.showerror(
-                    "Invalid XLSX Format",
-                    f"XLSX file must contain 'time_s' and channel {recorded_channels} load columns.",
-                )
-                return
+            with open(output_csv_file, 'w', newline='') as csv_file:
+                import csv
+                writer = csv.DictWriter(csv_file, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
 
             fig_data, ax_data = plt.subplots(figsize=(10, 6))
             for channel_label in recorded_channels:
                 load_column = f'ch{channel_label}_load'
-                ax_data.plot(df_from_xlsx['time_s'], df_from_xlsx[load_column], lw=1, label=f'Channel {channel_label}')
+                ax_data.plot(
+                    [row['time_s'] for row in rows],
+                    [row[load_column] for row in rows],
+                    lw=1,
+                    label=f'Channel {channel_label}',
+                )
             ax_data.set_xlabel('Time (s)')
             ax_data.set_ylabel('Load (N)')
-            ax_data.set_title(f'Converted Data (Channels {recorded_channels}) - {len(df_from_xlsx)} samples')
+            ax_data.set_title(f'Converted Data (Channels {recorded_channels}) - {len(rows)} samples')
             ax_data.grid(True, alpha=0.3)
             ax_data.legend(loc='upper right')
             fig_data.tight_layout()
             plt.show(block=False)
 
-            messagebox.showinfo("Conversion Complete", f"Wrote {self.output_xlsx_file} with {len(df)} rows.")
+            messagebox.showinfo("Conversion Complete", f"Wrote {output_csv_file} with {len(rows)} rows.")
         except Exception as exc:
             messagebox.showerror("Conversion Failed", str(exc))
     
