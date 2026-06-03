@@ -3,6 +3,7 @@ import time
 import threading
 import queue
 import math
+import os
 from collections import deque
 
 import matplotlib.pyplot as plt
@@ -26,7 +27,9 @@ from daqhats import (
 from daqhats_utils import select_hat_device
 
 
-def load_config(path='src/config.toml'):
+def load_config(path=None):
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.toml')
     with open(path, 'rb') as f:
         return tomllib.load(f)
 

@@ -51,7 +51,10 @@ def select_hat_device(filter_by_id):
             print('Address ', hat.address, ': ', hat.product_name, sep='')
         print('')
 
-        address = int(input('Select the address of the HAT device to use: '))
+        try:
+            address = int(input('Select the address of the HAT device to use: '))
+        except ValueError:
+            raise ValueError('Error: Invalid input — enter an integer address')
 
         # Verify the selected address if valid.
         for hat in hats:

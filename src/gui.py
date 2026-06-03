@@ -890,7 +890,12 @@ class DAQGUIApp:
         if os.path.exists(meta_file):
             try:
                 with open(meta_file, 'r') as f:
-                    recorded_channels = [int(ch.strip()) for ch in f.read().strip().split(',')]
+                    raw_channels = [int(ch.strip()) for ch in f.read().strip().split(',')]
+                valid_channels = [ch for ch in raw_channels if 1 <= ch <= self.num_channels]
+                if valid_channels:
+                    recorded_channels = valid_channels
+                else:
+                    print("Warning: .meta file contained no valid channel numbers; using defaults.")
             except Exception as e:
                 print(f"Warning: Could not read channel metadata: {e}")
 
@@ -1006,7 +1011,7 @@ class DAQGUIApp:
                 try:
                     self.hat.a_in_scan_stop()
                     self.hat.a_in_scan_cleanup()
-                except:
+                except Exception:
                     pass
     
     def update_display(self):

@@ -20,6 +20,7 @@ Stopping this example:
 """
 import socket
 import json
+import threading
 from time import sleep
 from collections import deque
 from dash import Dash, dcc, html
@@ -34,6 +35,7 @@ _app.css.config.serve_locally = True
 _app.scripts.config.serve_locally = True
 
 _HAT = None  # Store the hat object in a global for use in multiple callbacks.
+_HAT_LOCK = threading.Lock()  # Protect _HAT across concurrent Dash callbacks.
 
 MCC128_CHANNEL_COUNT = 8
 ALL_AVAILABLE = -1
@@ -235,14 +237,20 @@ def start_stop_click(n_clicks, button_label, hat_descriptor_json_str,
                 # If configuring, create the hat object.
                 if hat_descriptor_json_str:
                     hat_descriptor = json.loads(hat_descriptor_json_str)
-                    # The hat object is retained as a global for use in
-                    # other callbacks.
-                    global _HAT     # pylint: disable=global-statement
-                    _HAT = mcc128(hat_descriptor['address'])
-                    # Change to AnalogInputMode.DIFF for differential inputs.
-                    _HAT.a_in_mode_write(AnalogInputMode.SE)
-                    _HAT.a_in_range_write(input_range)
-                    output = 'configured'
+                    requested_address = hat_descriptor['address']
+                    valid_addresses = [h.address for h in hat_list(filter_by_id=HatIDs.MCC_128)]
+                    if requested_address not in valid_addresses:
+                        output = 'error'
+                    else:
+                        # The hat object is retained as a global for use in
+                        # other callbacks.
+                        global _HAT     # pylint: disable=global-statement
+                        with _HAT_LOCK:
+                            _HAT = mcc128(requested_address)
+                            # Change to AnalogInputMode.DIFF for differential inputs.
+                            _HAT.a_in_mode_write(AnalogInputMode.SE)
+                            _HAT.a_in_range_write(input_range)
+                        output = 'configured'
             else:
                 output = 'error'
         elif button_label == 'Start':
@@ -251,7 +259,8 @@ def start_stop_click(n_clicks, button_label, hat_descriptor_json_str,
             channel_mask = 0x0
             for channel in active_channels:
                 channel_mask |= 1 << channel
-            hat = globals()['_HAT']
+            with _HAT_LOCK:
+                hat = _HAT
             # Buffer 5 seconds of data
             samples_to_buffer = int(5 * sample_rate)
             hat.a_in_scan_start(channel_mask, samples_to_buffer,
@@ -261,7 +270,8 @@ def start_stop_click(n_clicks, button_label, hat_descriptor_json_str,
         elif button_label == 'Stop':
             # If stopping, call the a_in_scan_stop and a_in_scan_cleanup
             # functions.
-            hat = globals()['_HAT']
+            with _HAT_LOCK:
+                hat = _HAT
             hat.a_in_scan_stop()
             hat.a_in_scan_cleanup()
             output = 'idle'
@@ -459,18 +469,14 @@ def update_strip_chart_data(_n_intervals, acq_state, chart_data_json_str,
     samples_to_display = int(samples_to_display_val)
     num_channels = len(active_channels)
     if acq_state == 'running':
-        hat = globals()['_HAT']
+        with _HAT_LOCK:
+            hat = _HAT
         if hat is not None:
             chart_data = json.loads(chart_data_json_str)
 
             # By specifying -1 for the samples_per_channel parameter, the
             # timeout is ignored and all available data is read.
             read_result = hat.a_in_scan_read(ALL_AVAILABLE, RETURN_IMMEDIATELY)
-            
-            print(f"DEBUG: Read {len(read_result.data)} data points, num_channels={num_channels}")
-            if len(read_result.data) > 0:
-                samples_read = len(read_result.data) // num_channels
-                print(f"DEBUG: Samples per channel: {samples_read}")
 
             if ('hardware_overrun' not in chart_data.keys()
                     or not chart_data['hardware_overrun']):
@@ -485,7 +491,6 @@ def update_strip_chart_data(_n_intervals, acq_state, chart_data_json_str,
 
             # Update the total sample count.
             chart_data['sample_count'] = sample_count
-            print(f"DEBUG: Total sample_count now: {sample_count}")
             updated_chart_data = json.dumps(chart_data)
 
     elif acq_state == 'configured':
@@ -707,5 +712,5 @@ def get_ip_address():
 
 if __name__ == '__main__':
     # This will only be run when the module is called directly.
-    # Bind to all interfaces (0.0.0.0) to be accessible from both wired and wireless networks
-    _app.run(host='0.0.0.0', port=8080)
+    # Bind to localhost only; accessible via http://127.0.0.1:8080
+    _app.run(host='127.0.0.1', port=8080)

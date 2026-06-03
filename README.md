@@ -102,8 +102,10 @@ python src/continuous_read.py
 
 ```bash
 python src/web_server.py
-# Then open http://<hostname>:8080 in a browser
+# Then open http://127.0.0.1:8080 in a browser
 ```
+
+> **Note:** The web server binds to `127.0.0.1` (localhost only). It is accessible from the machine running the server but not from other devices on the network.
 
 ## System-wide Deployment
 
